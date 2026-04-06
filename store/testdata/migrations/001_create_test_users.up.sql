@@ -1,0 +1,4 @@
+CREATE TABLE IF NOT EXISTS test_users (
+    id   TEXT PRIMARY KEY,
+    name TEXT NOT NULL
+);
