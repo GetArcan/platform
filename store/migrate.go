@@ -14,15 +14,26 @@ import (
 // RunMigrations executes all pending .up.sql migrations from an embedded FS.
 // Migrations are numbered: 001_initial.up.sql, 002_add_index.up.sql, etc.
 // A schema_migrations table tracks which have been applied.
+// The dir parameter ("sqlite" or "postgres") determines SQL dialect.
 func RunMigrations(ctx context.Context, db *sql.DB, migrations embed.FS, dir string) error {
+	isPostgres := dir == "postgres"
+
 	// Create the tracking table if it doesn't exist.
-	_, err := db.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS schema_migrations (
-			version TEXT PRIMARY KEY,
-			applied_at TEXT NOT NULL DEFAULT (datetime('now'))
-		)
-	`)
-	if err != nil {
+	var createSQL string
+	if isPostgres {
+		createSQL = `
+			CREATE TABLE IF NOT EXISTS schema_migrations (
+				version TEXT PRIMARY KEY,
+				applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+			)`
+	} else {
+		createSQL = `
+			CREATE TABLE IF NOT EXISTS schema_migrations (
+				version TEXT PRIMARY KEY,
+				applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+			)`
+	}
+	if _, err := db.ExecContext(ctx, createSQL); err != nil {
 		return fmt.Errorf("creating schema_migrations table: %w", err)
 	}
 
@@ -43,7 +54,16 @@ func RunMigrations(ctx context.Context, db *sql.DB, migrations embed.FS, dir str
 	// Apply each migration that hasn't been applied yet.
 	for _, name := range files {
 		var exists int
-		err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations WHERE version = ?", name).Scan(&exists)
+		var checkSQL, insertSQL string
+		if isPostgres {
+			checkSQL = "SELECT COUNT(*) FROM schema_migrations WHERE version = $1"
+			insertSQL = "INSERT INTO schema_migrations (version) VALUES ($1)"
+		} else {
+			checkSQL = "SELECT COUNT(*) FROM schema_migrations WHERE version = ?"
+			insertSQL = "INSERT INTO schema_migrations (version) VALUES (?)"
+		}
+
+		err := db.QueryRowContext(ctx, checkSQL, name).Scan(&exists)
 		if err != nil {
 			return fmt.Errorf("checking migration %s: %w", name, err)
 		}
@@ -66,7 +86,7 @@ func RunMigrations(ctx context.Context, db *sql.DB, migrations embed.FS, dir str
 			return fmt.Errorf("executing migration %s: %w", name, err)
 		}
 
-		if _, err := tx.ExecContext(ctx, "INSERT INTO schema_migrations (version) VALUES (?)", name); err != nil {
+		if _, err := tx.ExecContext(ctx, insertSQL, name); err != nil {
 			tx.Rollback()
 			return fmt.Errorf("recording migration %s: %w", name, err)
 		}
